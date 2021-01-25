@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"math"
 	"net/http"
 	"net/http/httputil"
 	"sync"
@@ -92,7 +93,7 @@ func newLimiter(cfg config, proxy *httputil.ReverseProxy) *Limiter {
 		//queue:      queue.New(1024),
 		queueMax:   10,
 		threadsSem: make(chan int, 1024),
-		qps:        60 * 60,
+		qps:        120 * 60,
 
 		qpsIncome: ratecounter.NewRateCounter(time.Second),
 
@@ -166,13 +167,22 @@ func (l *Limiter) teacher() {
 	//		DL++
 	//	}
 	//}
-	queueMax := float64(snap.qps1i)*snap.lat1/1000/1000000/60 + float64(snap.threads)
-	log.Println(queueMax)
-	if float64(snap.queue) > queueMax {
-		l.qps /= 1.01
-	} else if float64(snap.queue) < queueMax {
-		l.qps *= 1.01
+	queueMax := float64(snap.qps60o)*snap.lat60/1000/1000000/60 + float64(snap.threads)
+	div := float64(snap.queue)/queueMax
+	q := math.Pow(div, 1.0/20.0)
+	log.Println(queueMax, div, q)
+	if q > 2 {
+		q = 2
+	} else if q < 0.5 {
+		q = 0.5
 	}
+	log.Println(queueMax, div, q)
+	l.qps /= q
+	//if div > 1 {
+	//
+	//} else if div < 1 {
+	//	l.qps *= 1.01
+	//}
 }
 
 func (l *Limiter) snapshot() Snapshot {
@@ -234,7 +244,7 @@ func (l *Limiter) handle(res http.ResponseWriter, req *http.Request) {
 	defer atomic.AddInt64(&l.queue, -1)
 	l.m.Unlock()
 
-	if l.qps1i.Rate() > s.qps {
+	if l.qps1i.Rate() > s.qps && s.queue > int64(s.threads) {
 		http.Error(res, "service is temporarily overloaded", http.StatusServiceUnavailable)
 		return
 	}
