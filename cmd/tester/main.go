@@ -18,18 +18,19 @@ var max int32
 
 func main() {
 	var queue int32
-
-	go func() {
-		for {
-			go func() {
-				atomic.AddInt32(&queue, 1)
-				qpsSent.Incr(1)
-				test()
-				atomic.AddInt32(&queue, -1)
-			}()
-			time.Sleep(time.Millisecond * 3)
-		}
-	}()
+	for i := 0; i < 10; i++ {
+		go func() {
+			for {
+				go func() {
+					atomic.AddInt32(&queue, 1)
+					qpsSent.Incr(1)
+					test()
+					atomic.AddInt32(&queue, -1)
+				}()
+				time.Sleep(time.Millisecond * 3)
+			}
+		}()
+	}
 	tick := time.Tick(time.Second)
 	for {
 		<-tick
@@ -39,6 +40,31 @@ func main() {
 	}
 }
 func test() {
+	//1 1 0
+	//1 1 1
+	//1 2 3
+	//1 4 7
+	//1 8 15
+	//1 16 31
+	//-1 8 23
+	//-1 4 19
+	//1 2 21
+	//1 1 22
+	//1 0.5 22.5
+	//1 1 23.5
+	//-1 0.5 23
+	//-1 0.25 22.75
+	//
+	//2 2 2
+	//-1/2
+	//
+	//
+	//
+	//	good:
+	//		x3 = x2 + (x2-x1)*step
+	//	bad: step/2
+	//		x3 = (x2+x1)/2
+
 	startTime := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
 	defer cancel()

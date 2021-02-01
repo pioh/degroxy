@@ -17,3 +17,5 @@ crashlytics-build.properties
 fabric.properties
 /.idea/
 /degroxy.iml
+/deproxy
+/prime
