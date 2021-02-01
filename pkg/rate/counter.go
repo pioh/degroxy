@@ -61,7 +61,7 @@ func (c *Counter) tick(now time.Time) {
 	if current >= c.intervals {
 		current = 0
 	}
-	c.time[current] = now.UnixNano()
+	atomic.StoreInt64(&c.time[current], now.UnixNano())
 	for i := int32(0); i < c.threads; i++ {
 		atomic.StoreInt32(&c.counter[current*c.threads+i], 0)
 	}
@@ -73,13 +73,13 @@ func (c *Counter) Add(count int32, thread int32) {
 	atomic.AddInt32(&c.counter[current*c.threads+thread], count)
 }
 
-// Sum counters for interval (2sec for example) with offset (10sec) + dt*2
+// Sum counters for interval (2sec for example) with offset (10sec) + dt
 // max interval = keepHistory
 // max offset = keepHistory - interval
 func (c *Counter) Sum(interval time.Duration, offset time.Duration) float64 {
 	current := atomic.LoadInt32(c.current)
 	now := time.Now().UnixNano()
-	from := now - offset.Nanoseconds() - c.dt*2
+	from := now - offset.Nanoseconds() - c.dt
 	to := from - interval.Nanoseconds()
 	current -= int32(offset.Nanoseconds()/c.dt) + 1
 
@@ -94,8 +94,8 @@ func (c *Counter) Sum(interval time.Duration, offset time.Duration) float64 {
 			prev = c.intervals - 1
 		}
 
-		t := c.time[current]
-		dt := c.time[prev] - t
+		t := atomic.LoadInt64(&c.time[current])
+		dt := atomic.LoadInt64(&c.time[prev]) - t
 
 		if t > from {
 			current--
