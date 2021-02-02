@@ -1,0 +1,58 @@
+package main
+
+import (
+	"log"
+)
+
+type RealtyPrices struct {
+	price int
+	space float32
+}
+
+func (r RealtyPrices) PricePerMeter() float32 {
+	return float32(r.price) / r.space
+}
+
+type Flat struct {
+	RealtyPrices
+	kitchenSpace float32
+}
+
+func (r Flat) PricePerMeter() float32 {
+	return float32(r.price) / (r.space + r.kitchenSpace)
+}
+
+type LandHouse struct {
+	RealtyPrices
+}
+
+type WithPricePerMeter interface {
+	PricePerMeter() float32
+}
+
+func PricePerMeterAverage(items []WithPricePerMeter) float32 {
+	var sum float32 = 0
+	for _, item := range items {
+		sum += item.PricePerMeter()
+	}
+	sum /= float32(len(items))
+	return sum
+}
+
+func FilterExpensive[T WithPricePerMeter](items []T, limit float32) []T {
+	var res []T
+	for _, item := range items {
+		if item.PricePerMeter() <= limit {
+			res = append(res, item)
+		}
+	}
+	return items
+}
+
+func main() {
+
+	t := FilterExpensive([]Flat{
+		Flat{RealtyPrices{10000, 49}, 10},
+	}, 100)
+	log.Printf("%v", t)
+}

@@ -5,8 +5,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/kpango/fastime"
 )
 
 type Counter struct {
@@ -19,8 +17,7 @@ type Counter struct {
 	now func() int64
 }
 
-func NewCounter(dt time.Duration, size time.Duration) *Counter {
-	now := fastime.UnixNanoNow
+func NewCounter(dt time.Duration, size time.Duration, now func() int64) *Counter {
 	c := &Counter{
 		counter:           make([]int32, int64(size/dt)+1),
 		dt:                dt.Nanoseconds(),
