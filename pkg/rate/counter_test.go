@@ -1,7 +1,6 @@
 package rate
 
 import (
-	"context"
 	"math"
 	"sync"
 	"testing"
@@ -9,11 +8,8 @@ import (
 )
 
 func TestRate(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	var threads int32 = 10
-	counter := NewCounter(ctx, time.Millisecond*10, time.Second, threads)
+	counter := NewCounter(time.Millisecond*10, time.Second)
 
 	done := make(chan bool)
 	wg := sync.WaitGroup{}
@@ -28,7 +24,7 @@ func TestRate(t *testing.T) {
 				case <-done:
 					return
 				case <-ticker.C:
-					counter.Add(1, thread)
+					counter.Add(1)
 				}
 			}
 		}(thread)

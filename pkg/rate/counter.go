@@ -1,122 +1,181 @@
 package rate
 
 import (
-	"context"
+	"errors"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kpango/fastime"
 )
 
 type Counter struct {
-	counter []int32 // [time][thread]
-	time    []int64 // [start time nanoseconds by counter index]
+	counter           []int32
+	dt                int64
+	lastFillZerosTime int64
 
-	intervals   int32
-	threads     int32
-	dt          int64
-	keepHistory int64
+	sync.Mutex
 
-	current *int32 // atomic use
-
-	ticker *time.Ticker
+	now func() int64
 }
 
-func NewCounter(ctx context.Context, dt time.Duration, keepHistory time.Duration, threads int32) *Counter {
-	intervals := int32(keepHistory/dt) + 4 // round up, and -2 +1 safe cell from now
+func NewCounter(dt time.Duration, size time.Duration) *Counter {
+	now := fastime.UnixNanoNow
 	c := &Counter{
-		keepHistory: keepHistory.Nanoseconds(),
-		intervals:   intervals,
-		threads:     threads,
-		dt:          dt.Nanoseconds(),
-		current:     new(int32),
-		counter:     make([]int32, intervals*threads),
-		time:        make([]int64, intervals),
-		ticker:      time.NewTicker(dt),
+		counter:           make([]int32, int64(size/dt)+1),
+		dt:                dt.Nanoseconds(),
+		lastFillZerosTime: now(),
+		now:               now,
 	}
-	now := time.Now().UnixNano()
-	c.time[0] = now
-	c.time[1] = now - dt.Nanoseconds()
-
-	for i := int32(2); i < intervals; i++ {
-		fromEnd := intervals - i // [_,_,... 3,2,1]
-		c.time[i] = now - dt.Nanoseconds()*int64(fromEnd)
-	}
-
-	go func() {
-		for {
-			select {
-			case now := <-c.ticker.C:
-				c.tick(now)
-			case <-ctx.Done():
-				c.ticker.Stop()
-			}
-		}
-	}()
-
 	return c
 }
 
-func (c *Counter) tick(now time.Time) {
-	current := atomic.LoadInt32(c.current)
-	current++
-	if current >= c.intervals {
-		current = 0
-	}
-	atomic.StoreInt64(&c.time[current], now.UnixNano())
-	for i := int32(0); i < c.threads; i++ {
-		atomic.StoreInt32(&c.counter[current*c.threads+i], 0)
-	}
-	atomic.StoreInt32(c.current, current)
+func (c *Counter) i(t int64) int {
+	return int((t / c.dt) % int64(len(c.counter)))
 }
 
-func (c *Counter) Add(count int32, thread int32) {
-	current := atomic.LoadInt32(c.current)
-	atomic.AddInt32(&c.counter[current*c.threads+thread], count)
+func (c *Counter) shift(i int, shift int) int {
+	i += shift
+	l := len(c.counter)
+	if i < 0 {
+		i += l
+	}
+	if i >= l {
+		i -= l
+	}
+	return i
 }
 
-// Sum counters for interval (2sec for example) with offset (10sec) + dt
+func (c *Counter) Add(count int32) {
+	now := c.now()
+	i := c.fillZeros(now)
+	atomic.AddInt32(&c.counter[i], count)
+}
+
+// returns now
+func (c *Counter) fillZeros(now int64) int {
+	last := atomic.LoadInt64(&c.lastFillZerosTime)
+	n := c.i(now)
+	l := c.i(last)
+	if n == l && now-last <= c.dt {
+		return n
+	}
+
+	c.Lock()
+	defer c.Unlock()
+	last = atomic.LoadInt64(&c.lastFillZerosTime)
+
+	for n != l || now-last > c.dt {
+		last += c.dt
+		l = c.shift(l, 1)
+		atomic.StoreInt32(&c.counter[l], 0)
+		atomic.StoreInt64(&c.lastFillZerosTime, last)
+	}
+	atomic.StoreInt64(&c.lastFillZerosTime, now)
+	return n
+}
+
+var ErrTimeOutOfRange = errors.New("time interval out of range")
+
+func interpolation3(x1, x2, x3, y1, y2, y3, x float64) (y float64) {
+	y = y1*(((x-x2)*(x-x3))/((x1-x2)*(x1-x3))) +
+		y2*(((x-x1)*(x-x3))/((x2-x1)*(x2-x3))) +
+		y3*(((x-x1)*(x-x2))/((x3-x1)*(x3-x2)))
+	return y
+}
+func interpolation2(x1, x2, y1, y2, x float64) (y float64) {
+	y = y2 + (y1-y2)*((x-x2)/(x1-x2))
+	return y
+}
+
+func (c *Counter) xy(t int64, now int64) (x float64, y float64) {
+	left := t / c.dt * c.dt
+	endLeft := now / c.dt * c.dt
+	//beginLeft := (now - c.dt*int64(len(c.counter))) / c.dt * c.dt
+	y = float64(atomic.LoadInt32(&c.counter[c.i(t)]))
+	if left != endLeft {
+		x = float64(left + c.dt/2)
+	} else if now-left < c.dt/10 {
+		return 0, 0
+	} else {
+		x = float64(left/2 + now/2)
+		y *= float64(c.dt) / float64(now-left)
+	}
+	return x, y
+}
+
+func (c *Counter) interpolate(t int64, now int64, right bool) (y float64) {
+	left := t / c.dt * c.dt
+	endLeft := now / c.dt * c.dt
+	beginLeft := (now - c.dt*int64(len(c.counter))) / c.dt * c.dt
+	points := 2
+	var x1, x2, x3, y1, y2, y3, x float64
+	x1, y1 = c.xy(left, now)
+	if left == beginLeft {
+		x2, y2 = c.xy(left+c.dt, now)
+	} else if left == endLeft {
+		x2, y2 = c.xy(left-c.dt, now)
+	} else {
+		x2, y2 = c.xy(left+c.dt, now)
+		x3, y3 = c.xy(left-c.dt, now)
+		points = 3
+	}
+	if points == 3 && x3 == 0 {
+		points--
+	}
+	if x2 == 0 {
+		x2, y2 = x3, y3
+		points--
+	}
+	if x1 == 0 {
+		x1, y1 = x2, y2
+		points--
+	}
+	x = float64(t/2 + left/2)
+	if points == 3 {
+		y = interpolation3(x1, x2, x3, y1, y2, y3, x)
+	} else if points == 2 {
+		y = interpolation2(x1, x2, y1, y2, x)
+	} else {
+		y = y1
+	}
+	if right {
+		y *= float64(t-left) / float64(c.dt)
+	} else {
+		y *= float64(left+c.dt-t) / float64(c.dt)
+	}
+	return y
+}
+
+// Sum counters for interval (2sec for example) with offset (10sec)
 // max interval = keepHistory
 // max offset = keepHistory - interval
 func (c *Counter) Sum(interval time.Duration, offset time.Duration) float64 {
-	current := atomic.LoadInt32(c.current)
-	now := time.Now().UnixNano()
-	from := now - offset.Nanoseconds() - c.dt
+	if offset < 0 || interval < 0 || int64(offset+interval) > c.dt*int64(len(c.counter)) {
+		panic(ErrTimeOutOfRange)
+	}
+	if interval == 0 {
+		return 0
+	}
+	now := c.now()
+	c.fillZeros(now)
+
+	from := now - offset.Nanoseconds()
 	to := from - interval.Nanoseconds()
-	current -= int32(offset.Nanoseconds()/c.dt) + 1
 
 	sum := float64(0)
 
-	for {
-		prev := current + 1
-		if current < 0 {
-			current = c.intervals - 1
-		}
-		if prev < 0 {
-			prev = c.intervals - 1
-		}
-
-		t := atomic.LoadInt64(&c.time[current])
-		dt := atomic.LoadInt64(&c.time[prev]) - t
-
-		if t > from {
-			current--
-			continue
-		}
-		s := float64(0)
-		for i := int32(0); i < c.threads; i++ {
-			s += float64(atomic.LoadInt32(&c.counter[current*c.threads+i]))
-		}
-		if t < to {
-			s *= float64(t+dt-to) / float64(dt)
-			sum += s
-			break
-		}
-
-		if t+dt > from {
-			s *= float64(from-t) / float64(dt)
-		}
-		sum += s
-
-		current--
+	i := c.i(from - c.dt)
+	for t := from - c.dt; t >= to+c.dt; t -= c.dt { // грузим все целые ячейки (кроме первой и последней)
+		sum += float64(atomic.LoadInt32(&c.counter[i]))
+		i = c.shift(i, -1)
+	}
+	if from-to >= c.dt {
+		sum += c.interpolate(from, now, true)
+		sum += c.interpolate(to, now, false)
+	} else {
+		sum += c.interpolate(from, now, true)
+		sum -= c.interpolate(to, now, true)
 	}
 
 	return sum
