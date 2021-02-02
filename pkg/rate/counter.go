@@ -64,12 +64,15 @@ func (c *Counter) fillZeros(now int64) int {
 	c.Lock()
 	defer c.Unlock()
 	last = atomic.LoadInt64(&c.lastFillZerosTime)
+	l = c.i(last)
 
+	//log.Println(n,l, now-last>c.dt)
 	for n != l || now-last > c.dt {
 		last += c.dt
+		//cc := atomic.LoadInt32(&c.counter[l])
 		l = c.shift(l, 1)
+		//log.Println(l, cc, atomic.LoadInt32(&c.counter[l]))
 		atomic.StoreInt32(&c.counter[l], 0)
-		atomic.StoreInt64(&c.lastFillZerosTime, last)
 	}
 	atomic.StoreInt64(&c.lastFillZerosTime, now)
 	return n
@@ -95,7 +98,7 @@ func (c *Counter) xy(t int64, now int64) (x float64, y float64) {
 	y = float64(atomic.LoadInt32(&c.counter[c.i(t)]))
 	if left != endLeft {
 		x = float64(left + c.dt/2)
-	} else if now-left < c.dt/10 {
+	} else if now-left < c.dt {
 		return 0, 0
 	} else {
 		x = float64(left/2 + now/2)
